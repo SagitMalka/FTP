@@ -1,7 +1,7 @@
 import select
 import socket
 from ftplib import FTP
-
+import time
 import packet
 
 RUDP_PORT = 5000  # Define the RUDP port number to use
@@ -10,12 +10,12 @@ FTP_PORT = 21  # Define the FTP port number to use
 BUFFER_SIZE = 1024  # Define the buffer size for data transfer
 MAX_RETRIES = 5  # Define the maximum number of RUDP transfer retries
 RETRY_DELAY = 1  # Define the delay between RUDP transfer retries (in seconds)
-
+resultFLAG = False
 
 # Define the FTP server settings
 TCP_HOST = '0.0.0.0'
 TCP_PORT = 22
-
+last_byte = 0
 
 def tcp_upload(file_name):
     print(f"TCP upload {file_name}...")
@@ -43,6 +43,62 @@ def start_tcp_connection():
 
     return ftp
 
+def recv_msg(sock):
+    try:
+        msg, addr = sock.recvfrom(8192)
+        msg.decode()
+        msg.split('_', 1)
+        return msg, addr
+    except OSError:
+        return 'TIMEOUT', -1,
+
+def recv_packets(sock):
+    try:
+        trs_msg, addr = sock.recvfrom(8192)
+        temp, packett = packet.extract(trs_msg)
+        seq_num = temp[0]
+        checksum = temp [1]
+        cwnd = temp[2]
+        return packett, addr, seq_num, checksum, cwnd
+    except OSError:
+        return 'TIMEOUT', -1, -1, -1, 10
+
+def handshake(sock, server_addr):
+    global resultFLAG
+    for i in range(5):
+        sock.sendto('HandShake'.encode(), server_addr)
+    time.sleep(1)
+
+    result = ''
+    addr = ''
+    step2 = False
+    for i in range(5):
+        try:
+            temp1, temp2 = recv_msg(sock)
+            if temp1 == 'TIMEOUT':
+                pass
+            if not step2:
+                result = temp1
+                addr = temp2
+                step2 = True
+        except IOError:
+          pass
+
+    if result == '' or addr == '':
+        print('couldnt get an ack')
+
+    if result[0] == 'ACK':
+        resultFLAG = True
+        time.sleep(0.2)
+    else:
+        resultFLAG = True
+        time.sleep(0.2)
+
+    for i in range(5):
+        sock.sendto('ACK'.encode(), server_addr)
+
+    time.sleep(1)
+
 
 def foo():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -54,13 +110,95 @@ def foo():
         sock.sendto("ack".encode(), addr)
 
 
-def open_file_to_write(file_name):
-    try:
-        file = open(file_name, 'wb')
-        return file
-    except IOError:
-        print('filed open file', file_name)
-        return
+def open_file_to_write(file_name, packets_list):
+    global last_byte
+    with open(file_name, 'ab') as file:
+        for i in packets_list:
+            while i:
+                file.write()
+    last_byte = str(bytearray(packets_list[-1])[-1])
+    time.sleep(0.15)
+
+
+    # try:
+    #     file = open(file_name, 'wb')
+    #     return file
+    # except IOError:
+    #     print('filed open file', file_name)
+    #     return
+
+def UDP_thread(file_name):
+    server_addr = (RUDP_HOST, RUDP_PORT)
+    rudp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rudp_socket.settimeout(60)
+    rudp_socket.connect(server_addr)
+
+    global resultFLAG
+    resultFLAG = True
+    time.sleep(0.5)
+    if handshake(rudp_socket, server_addr):
+        resultFLAG = True
+        time.sleep(0.5)
+
+        packet_len = ''
+        step4 = False
+        for i in range(5):
+            try:
+                temp1, _ = recv_msg(rudp_socket)
+                if not step4:
+                    packet_len = temp1[1]
+                    step4 = True
+            except IOError or UnicodeError:
+                pass
+
+        if packet_len == '':
+            resultFLAG = True
+            time.sleep(0.5)
+
+        packet_list = [] * int(packet_len)
+        resultFLAG = True
+        time.sleep(0.5)
+
+        rudp_download_file(rudp_socket, server_addr, packet_list, file_name)
+    else:
+        print('3 way HS fail')
+    rudp_socket.close()
+
+
+def rudp_download_file(rudp_socket, server_addr, packets_list, file_name):
+    index = 0
+    rudp_socket.settimeout(60)
+    cwnd = 10
+
+    while index != len(packets_list):
+        window_frame = min(index + cwnd + 2, len(packets_list))
+        for i in range(index, window_frame):
+            packet, addr, seq_num, checksum, cwnd = recv_packets(rudp_socket)
+            if packet == 'TIMEOUT' or seq_num == -1:
+                rudp_socket.sendto(('NACK_' + str(seq_num)).encode(), server_addr)
+            else:
+                try:
+                    rspo = packet.decode()
+                    rspo.split('_', 1)
+                    if packet.calc_checksum(packet) == checksum:
+                        packets_list[seq_num] = packet
+                        rudp_socket.sendto(('ACK_' + str(seq_num)).encode(), server_addr)
+                        index += 1
+                    else:
+                        rudp_socket.sendto(('NACK_' + str(seq_num)).encode(), server_addr)
+
+                except UnicodeDecodeError:
+                    if packet.calc_checksum(packet) == checksum:
+                        packets_list[seq_num] = packet
+                        rudp_socket.sendto(('ACK_' + str(seq_num)).encode(), server_addr)
+                        index += 1
+                    else:
+                        rudp_socket.sendto(('NACK_' + str(seq_num)).encode(), server_addr)
+    rudp_socket.sendto('ACKALL'.encode(), server_addr)
+    time.sleep(0.15)
+    open_file_to_write(file_name, packets_list)
+
+
 
 
 def rudp_download(file_name):
@@ -141,10 +279,12 @@ def ask_server():
             elif command.startswith("GET"):
                 if command.split()[1] == "--tcp":
                     filename = command.split()[2]
-                    tcp_download(filename)
+                    UDP_thread(filename)
                 else:
                     filename = command.split()[1]
-                    rudp_download(filename)
+                    # rudp_download(filename)
+                    # rudp_download_file(rudp_socket, server_addr, packets_list, file_name)
+                    UDP_thread(filename)
 
             elif command == "LIST":
                 # Receive a list of files in the current directory from server
@@ -159,7 +299,7 @@ def ask_server():
                 print("unknown command.")
                 # Receive FTP command response from server
                 data = ftp_socket.recv(BUFFER_SIZE)
-                print(data.decode())
+                # print(data.decode())
 
 
 def connect_to_server():
