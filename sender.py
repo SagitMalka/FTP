@@ -1,3 +1,7 @@
+import _thread
+import signal
+import timeit
+
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
@@ -7,12 +11,19 @@ import os
 import time
 import logging
 
+import packet
+from timer import Timer
+
 # from custom_handler import MyHandler
 
 # RUDP configuration
 RUDP_PORT = 5000
 RUDP_HOST = '127.0.0.1'
 FTP_PORT = 21
+PACKET_SIZE = 1024
+SLEEP = 0.1
+TIMEOUT_INTERVAL = 0.5
+WINDOW_SIZE = 4
 
 # TCP configuration
 TCP_HOST = '0.0.0.0'
@@ -22,6 +33,116 @@ FTP_DIRECTORY = 'store/'
 BUFFER_SIZE = 1024
 users = {"Sagitush": "123456",
          "Lielelel": "password"}
+
+# shared resources across threads
+base = 0
+mutex = _thread.allocate_lock()
+send_timer = Timer()
+
+
+# set window size
+def set_window_size(num_packets):
+    global base
+    return min(WINDOW_SIZE, num_packets - base)
+
+
+def file_to_packets(file_name):
+    # open file
+    try:
+        file = open("store/" + file_name, 'rb')
+    except IOError:
+        print('filed open file', file_name)
+        return
+
+    # make all packets and add to the buffer
+    packets = []
+    seq_num = 0
+    while True:
+        data = file.read(PACKET_SIZE)
+        if not data:
+            break
+        packets.append(packet.make(seq_num, data))
+        seq_num += 1
+
+    window_size = set_window_size(len(packets))
+    file.close()
+
+    return packets, len(packets), window_size
+
+
+# send thread
+def send_file(conn, file_name):
+    global mutex
+    global base
+    global send_timer
+
+    conn.recv(BUFFER_SIZE).decode()
+    rudp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    packets, num_packets, window_size = file_to_packets(file_name)
+    next_to_send, base = 0, 0
+
+    # start receiver thread:
+    rudp_sock.sendto("ack".encode(), (RUDP_HOST, RUDP_PORT))
+    receive_thread = threading.Thread(target=receive_ack, args=(rudp_sock,))
+    receive_thread.start()
+
+
+    while base < num_packets:
+        mutex.acquire()
+
+        # send all packet in the window
+        while next_to_send < base + window_size:
+            print('sending packet', next_to_send)
+            rudp_sock.sendto(packets[next_to_send], (RUDP_HOST, RUDP_PORT))
+            next_to_send += 1
+
+        # start timer
+        if not send_timer.is_running():
+            send_timer.start(TIMEOUT_INTERVAL)
+
+        # wait for ACK or time out
+        while send_timer.is_running() and not send_timer.timeout:
+            mutex.release()
+            print('taking a nap.')
+            time.sleep(SLEEP)
+            mutex.acquire()
+
+        if send_timer.timeout:
+            print('time out detected')
+            # send_timer.stop()
+            next_to_send = base
+        else:
+            #  move window [i - i+3] =>  [i+1 - i+4]
+        #     # print('sliding the window')
+            window_size = set_window_size(num_packets)
+        mutex.release()
+
+    # send empty packet as sentinel
+    rudp_sock.sendto(packet.make_empty(), (RUDP_HOST, RUDP_PORT))
+
+
+def receive_ack(sock):
+    global mutex
+    global base
+    global send_timer
+
+    print(sock)
+    while True:
+        # sock.sendto(data.encode(), (RUDP_HOST, RUDP_PORT))
+        # sock.recvfrom(BUFFER_SIZE)
+        pak = sock.recvfrom(1024)
+        ack, g_data = packet.extract(pak)
+
+        # if got ACK for the first packet in-flight
+        print('got ACK', ack)
+        if ack >= base:
+            mutex.acquire()
+            base = (ack + 1) % 4
+            print('base update:', base)
+            send_timer.stop()
+            mutex.release()
+
 
 def send_rudp_packet(sock, data):
     # for i in range(5):
@@ -34,6 +155,15 @@ def send_rudp_packet(sock, data):
     #         return True
     #
     # return False
+
+def foo(conn):
+    conn.recv(BUFFER_SIZE).decode()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    while True:
+        sock.sendto("data".encode(),  (RUDP_HOST, RUDP_PORT))
+        ans = sock.recvfrom(1024)
+        print(ans)
+
 
 
 def send_file_via_rudp(file_name, conn):
@@ -54,7 +184,6 @@ def send_file_via_rudp(file_name, conn):
 
         data = f.read(BUFFER_SIZE)
         time.sleep(0.02)  # Give receiver a bit time to save
-
 
     print(f"{file_name} sent successfully!")
     sock.close()
@@ -123,7 +252,8 @@ def run_server(conn, addr):
             elif command == "GET":
                 if args[0] != "--tcp":
                     filename = args[0]
-                    send_file_via_rudp(filename, conn)
+                    # foo(conn)
+                    send_file(conn, filename)
             elif command == 'UPLOAD':
                 pass
             else:
