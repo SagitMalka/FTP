@@ -1,320 +1,179 @@
-import select
+import hashlib
+import os
+import threading
+
 import socket
 from ftplib import FTP
-import time
-import packet
+from handler import *
+from constants import *
 
-RUDP_PORT = 5000  # Define the RUDP port number to use
-RUDP_HOST = '127.0.0.1'  # Define the RUDP HOST number to use
-FTP_PORT = 21  # Define the FTP port number to use
-BUFFER_SIZE = 1024  # Define the buffer size for data transfer
-MAX_RETRIES = 5  # Define the maximum number of RUDP transfer retries
-RETRY_DELAY = 1  # Define the delay between RUDP transfer retries (in seconds)
-resultFLAG = False
+# GLOBALS
+SEQ_FLAG = 0
 
-# Define the FTP server settings
-TCP_HOST = '0.0.0.0'
-TCP_PORT = 22
-last_byte = 0
+class Client:
+    def __init__(self):
+        self.rudp_fd = None
+        self.fd = None
+        self.ftp = None
+        self.file = None
+        self.ftp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # Create an FTP socket
+        self.ftp_socket.connect(('127.0.0.1', FTP_PORT))  # Connect to the FTP server
 
-def tcp_upload(file_name):
-    print(f"TCP upload {file_name}...")
-    server = start_tcp_connection()
-    with open(file_name, 'rb') as f:
-        server.storbinary(f'STOR {file_name}', f)
-    print("Finish!")
+    def start(self):
+        thread = self.connect_to_server()
+        self.ftp = FTP()
+        thread.join()
 
+    def close(self):
+        # Close the FTP connection
+        self.ftp_socket.close()
 
-def tcp_download(file_name):
-    server = start_tcp_connection()
-    print(f"Downloading {file_name}...")
-    with open(file_name, "wb") as file:
-        server.retrbinary(f"RETR {file_name}", file.write)
-    print("Finish!")
-
-
-def start_tcp_connection():
-    username = 'Sagit'  #input("User name: ")
-    password = '123456'  #input("Password: ")
-
-    ftp = FTP()
-    ftp.connect(TCP_HOST, TCP_PORT)
-    ftp.login(username, password)
-
-    return ftp
-
-def recv_msg(sock):
-    try:
-        msg, addr = sock.recvfrom(8192)
-        msg.decode()
-        msg.split('_', 1)
-        return msg, addr
-    except OSError:
-        return 'TIMEOUT', -1,
-
-def recv_packets(sock):
-    try:
-        trs_msg, addr = sock.recvfrom(8192)
-        temp, packett = packet.extract(trs_msg)
-        seq_num = temp[0]
-        checksum = temp [1]
-        cwnd = temp[2]
-        return packett, addr, seq_num, checksum, cwnd
-    except OSError:
-        return 'TIMEOUT', -1, -1, -1, 10
-
-def handshake(sock, server_addr):
-    global resultFLAG
-    for i in range(5):
-        sock.sendto('HandShake'.encode(), server_addr)
-    time.sleep(1)
-
-    result = ''
-    addr = ''
-    step2 = False
-    for i in range(5):
+    def tcp_upload(self, file_name):
+        print(f"TCP upload {file_name}...")
         try:
-            temp1, temp2 = recv_msg(sock)
-            if temp1 == 'TIMEOUT':
-                pass
-            if not step2:
-                result = temp1
-                addr = temp2
-                step2 = True
-        except IOError:
-          pass
+            self.start_tcp_connection()
+            with open(file_name, 'rb') as f:
+                self.ftp.storbinary(f'STOR {file_name}', f)
+        except Exception as e:
+            print(f"Upload Failed. Error: '{e}'")
+        print("Finish!")
 
-    if result == '' or addr == '':
-        print('couldnt get an ack')
+    def tcp_download(self, file_name):
+        self.start_tcp_connection()
+        print(f"Downloading {file_name}...")
+        try:
+            with open(file_name, "wb") as file:
+                self.ftp.retrbinary(f"RETR {file_name}", file.write)
+        except Exception as e:
+            print(f"Download Failed. Error: '{e}'")
+        print("Finish!")
 
-    if result[0] == 'ACK':
-        resultFLAG = True
-        time.sleep(0.2)
-    else:
-        resultFLAG = True
-        time.sleep(0.2)
+    def start_tcp_connection(self):
+        username = input("User name: ")
+        password = input("Password: ")
 
-    for i in range(5):
-        sock.sendto('ACK'.encode(), server_addr)
+        self.ftp.connect(TCP_HOST, TCP_PORT)
+        self.ftp.login(username, password)
 
-    time.sleep(1)
+    # @staticmethod
+    # def open_file_to_write(file_name, packets_list):
+    #     global last_byte
+    #     with open(file_name, 'ab') as file:
+    #         for i in packets_list:
+    #             while i:
+    #                 file.write()
+    #     last_byte = str(bytearray(packets_list[-1])[-1])
+    #     time.sleep(0.15)
+
+    def connect_to_server(self):
+        # Print the welcome message
+        data = self.ftp_socket.recv(BUFFER_SIZE)
+        print(data.decode())
+        thread = threading.Thread(target=send_requests, args=(self, ))
+        thread.start()
+        return thread
+
+    def delete_file(self, file_name, msg=""):
+        self.file.close()
+        print(msg)
+        os.remove("r_" + file_name)
+
+    @staticmethod
+    def process_packet(pkt):
+        print(pkt)
+        header, pkt_payload = pkt.split(PACKET_DELIMITER1)
+        hash_code, seq, length = header.decode().split(HEADER_DELIMITER)
+        return hash_code, seq, int(length), pkt_payload
+
+    @staticmethod
+    def check_seq(seq):
+        return SEQ_FLAG == int(seq == True)
+
+    @staticmethod
+    def check_hash(payload_hash, payload):
+        return payload_hash == hashlib.sha1(payload).hexdigest()
 
 
-def foo():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((RUDP_HOST, RUDP_PORT))
-    ftp_socket.send("rudp socket is up!".encode())
-    while True:
-        ans, addr = sock.recvfrom(1024)
-        print(ans)
-        sock.sendto("ack".encode(), addr)
+    def send_ack(self, seq_num, packet_len, addr):
+        print(30*"===")
+        print("send ack")
+        print(30 * "===")
 
+        self.rudp_fd.sendto((str(seq_num) + "," + str(packet_len)).encode(), addr)
 
-def open_file_to_write(file_name, packets_list):
-    global last_byte
-    with open(file_name, 'ab') as file:
-        for i in packets_list:
-            while i:
-                file.write()
-    last_byte = str(bytearray(packets_list[-1])[-1])
-    time.sleep(0.15)
+    def start_rudp_connection(self):
+        self.rudp_fd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.rudp_fd.settimeout(CONNECTION_TIMEOUT)
+        self.rudp_fd.bind(RUDP_ADDR)
 
+    def close_rudp_con(self):
+        self.rudp_fd.close()
+        self.file.close()
 
-    # try:
-    #     file = open(file_name, 'wb')
-    #     return file
-    # except IOError:
-    #     print('filed open file', file_name)
-    #     return
+    def rudp_download(self, file_name):
+        global SEQ_FLAG
 
-def UDP_thread(file_name):
-    server_addr = (RUDP_HOST, RUDP_PORT)
-    rudp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    rudp_socket.settimeout(60)
-    rudp_socket.connect(server_addr)
+        pkt_ctr = 0
+        # Start - Connection initiation
+        while True:
 
-    global resultFLAG
-    resultFLAG = True
-    time.sleep(0.5)
-    if handshake(rudp_socket, server_addr):
-        resultFLAG = True
-        time.sleep(0.5)
+            # seqNoFlag = 0
+            self.file = open("r_" + file_name, 'wb')
 
-        packet_len = ''
-        step4 = False
-        for i in range(5):
             try:
-                temp1, _ = recv_msg(rudp_socket)
-                if not step4:
-                    packet_len = temp1[1]
-                    step4 = True
-            except IOError or UnicodeError:
-                pass
+                # Receive indefinitely
+                while 1:
+                    # Receive response
+                    print('\nWaiting to receive..')
+                    # Reset failed trials on successful transmission
+                    receive_trials_count = 0
 
-        if packet_len == '':
-            resultFLAG = True
-            time.sleep(0.5)
+                    try:
+                        data, addr = self.rudp_fd.recvfrom(4096)
 
-        packet_list = [] * int(packet_len)
-        resultFLAG = True
-        time.sleep(0.5)
+                    except Exception as e:
+                        receive_trials_count += 1
+                        if receive_trials_count > MAX_TRIALS:
+                            self.delete_file(file_name=file_name,
+                                        msg=f"\nFailed to get data from server, download abort!\n")
+                            break
 
-        rudp_download_file(rudp_socket, server_addr, packet_list, file_name)
-    else:
-        print('3 way HS fail')
-    rudp_socket.close()
+                        print(f"\nFailed num to receive packet, error msg: '{e}'")
+                        continue
 
+                    payload_hash, seq_num, packet_len, payload = self.process_packet(data)
 
-def rudp_download_file(rudp_socket, server_addr, packets_list, file_name):
-    index = 0
-    rudp_socket.settimeout(60)
-    cwnd = 10
+                    if self.check_hash(payload_hash, payload) and self.check_seq(seq_num):
+                        if payload == FILE_NOT_FOUND:
+                            self.delete_file(file_name=file_name,
+                                        msg="Requested file could not be found on the server")
+                            self.close_rudp_con()
+                            return
+                        else:
+                            self.file.write(payload)
 
-    while index != len(packets_list):
-        window_frame = min(index + cwnd + 2, len(packets_list))
-        for i in range(index, window_frame):
-            packet, addr, seq_num, checksum, cwnd = recv_packets(rudp_socket)
-            if packet == 'TIMEOUT' or seq_num == -1:
-                rudp_socket.sendto(('NACK_' + str(seq_num)).encode(), server_addr)
-            else:
-                try:
-                    rspo = packet.decode()
-                    rspo.split('_', 1)
-                    if packet.calc_checksum(packet) == checksum:
-                        packets_list[seq_num] = packet
-                        rudp_socket.sendto(('ACK_' + str(seq_num)).encode(), server_addr)
-                        index += 1
+                        print(f"Sequence number: {seq_num}\nLength: {packet_len}")
+                        print(f"Server: {RUDP_HOST} on port {RUDP_PORT}")
+
+                        self.send_ack(seq_num, packet_len, addr)
                     else:
-                        rudp_socket.sendto(('NACK_' + str(seq_num)).encode(), server_addr)
+                        # print("Checksum mismatch detected, dropping packet")
+                        if not self.check_hash(payload_hash, payload):
+                            print("checksum error")
+                        else:
+                            print("seq error")
+                        print(f"Server: {RUDP_HOST} on port {RUDP_PORT}")
+                        continue
 
-                except UnicodeDecodeError:
-                    if packet.calc_checksum(packet) == checksum:
-                        packets_list[seq_num] = packet
-                        rudp_socket.sendto(('ACK_' + str(seq_num)).encode(), server_addr)
-                        index += 1
-                    else:
-                        rudp_socket.sendto(('NACK_' + str(seq_num)).encode(), server_addr)
-    rudp_socket.sendto('ACKALL'.encode(), server_addr)
-    time.sleep(0.15)
-    open_file_to_write(file_name, packets_list)
+                    if packet_len < PACKET_SIZE:
+                        # seq_num = int(not seq_num)
+                        return
 
-
-
-
-def rudp_download(file_name):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((RUDP_HOST, RUDP_PORT))
-
-    ftp_socket.send("rudp socket is up!".encode())
-    file = open_file_to_write(file_name)
-    pak, addr = sock.recvfrom(1024)
-
-    expected_seq_num = 0
-    while True:
-        # get the next packet from sender
-        pak, addr = sock.recvfrom(1024)
-
-        if not pak:
-            break
-
-        seq_num, data = packet.extract(pak)
-        print('got packet num ', seq_num)
-
-        # send ACK to server
-        if seq_num == expected_seq_num:
-            print('got expected packet, sending ACK ', expected_seq_num)
-            pak = packet.make(expected_seq_num)
-            sock.sendto(pak, addr)
-            expected_seq_num += 1
-            file.write(data)
-        else:
-            print('sending ACK', expected_seq_num - 1)
-            pak = packet.make(expected_seq_num - 1)
-            sock.sendto(pak, addr)
-    file.close()
-    sock.close()
-
-
-
-    ###########
-    # while True:
-    #     file = open(file_name, 'wb')
-    #     timeout = 10
-    #     ctr = 0
-    #     while True:
-    #         ready = select.select([sock], [], [], timeout)
-    #         if ready[0]:
-    #             pak, addr = sock.recvfrom(1024)
-    #             file.write(pak)
-    #             # sock.sendto("ack".encode(), (RUDP_IP, RUDP_PORT))
-    #         else:
-    #             print(f"{file_name} received successfully!")
-    #             file.close()
-    #             data_recv = True
-    #             break
-    #
-    #     if data_recv:
-    #         break
-    #
-    # file.close()
-    # sock.close()
-
-
-def ask_server():
-    # Send FTP commands to server
-    while True:
-        command = input("> ")
-        if command == "a":
-            ftp_socket.send("GET filee.txt".encode())
-            rudp_download('filee.txt')
-            # foo()
-        else:
-            ftp_socket.send(command.encode())
-
-            if command == "QUIT":
-                # Exit loop and close FTP connection
-                ftp_socket.close()
-                break
-
-            elif command.startswith("GET"):
-                if command.split()[1] == "--tcp":
-                    filename = command.split()[2]
-                    UDP_thread(filename)
-                else:
-                    filename = command.split()[1]
-                    # rudp_download(filename)
-                    # rudp_download_file(rudp_socket, server_addr, packets_list, file_name)
-                    UDP_thread(filename)
-
-            elif command == "LIST":
-                # Receive a list of files in the current directory from server
-                data = ftp_socket.recv(BUFFER_SIZE)
-                print(data.decode())
-
-            elif command.startswith("UPLOAD"):
-                filename = command.split()[1]
-                tcp_upload(filename)
-
-            else:
-                print("unknown command.")
-                # Receive FTP command response from server
-                data = ftp_socket.recv(BUFFER_SIZE)
-                # print(data.decode())
-
-
-def connect_to_server():
-    # Print the welcome message
-    data = ftp_socket.recv(BUFFER_SIZE)
-    print(data.decode())
-    ask_server()
+            finally:
+                print("Closing socket")
+            self.close_rudp_con()
 
 
 if __name__ == '__main__':
-
-    ftp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # Create an FTP socket
-    ftp_socket.connect(('127.0.0.1', FTP_PORT))  # Connect to the FTP server
-
-    connect_to_server()
-
-    # Close the FTP connection
-    ftp_socket.close()
+    client = Client()
+    client.start()
