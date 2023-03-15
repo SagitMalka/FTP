@@ -6,6 +6,7 @@ import socket
 from ftplib import FTP
 from handler import *
 from constants import *
+from packet import Packet
 
 # GLOBALS
 SEQ_FLAG = 0
@@ -55,16 +56,6 @@ class Client:
         self.ftp.connect(TCP_HOST, TCP_PORT)
         self.ftp.login(username, password)
 
-    # @staticmethod
-    # def open_file_to_write(file_name, packets_list):
-    #     global last_byte
-    #     with open(file_name, 'ab') as file:
-    #         for i in packets_list:
-    #             while i:
-    #                 file.write()
-    #     last_byte = str(bytearray(packets_list[-1])[-1])
-    #     time.sleep(0.15)
-
     def connect_to_server(self):
         # Print the welcome message
         data = self.ftp_socket.recv(BUFFER_SIZE)
@@ -77,13 +68,6 @@ class Client:
         self.file.close()
         print(msg)
         os.remove("r_" + file_name)
-
-    @staticmethod
-    def process_packet(pkt):
-        print(pkt)
-        header, pkt_payload = pkt.split(PACKET_DELIMITER1)
-        hash_code, seq, length = header.decode().split(HEADER_DELIMITER)
-        return hash_code, seq, int(length), pkt_payload
 
     @staticmethod
     def check_seq(seq):
@@ -141,7 +125,7 @@ class Client:
                         print(f"\nFailed num to receive packet, error msg: '{e}'")
                         continue
 
-                    payload_hash, seq_num, packet_len, payload = self.process_packet(data)
+                    payload_hash, seq_num, packet_len, payload = Packet.extract(data)
 
                     if self.check_hash(payload_hash, payload) and self.check_seq(seq_num):
                         if payload == FILE_NOT_FOUND:
@@ -171,7 +155,7 @@ class Client:
 
             finally:
                 print("Closing socket")
-            self.close_rudp_con()
+                self.close_rudp_con()
 
 
 if __name__ == '__main__':
